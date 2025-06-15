@@ -1,10 +1,10 @@
 {
-  "name": "BGW_FLIPPER-TUNNEL",
-  "title": "BGW_FLIPPER-TUNNEL",
+  "name": "bgw_flipper_tunnel",
+  "title": "BGW Flipper Tunnel",
   "version": "0.1",
   "author": "BGW",
   "icon": "icons/ir",
-  "exec": "BGW_FLIPPER_tunnel_app",
+  "exec": "bgw_flipper_tunnel_app",
   "backend": "c",
-  "description": "Streams IR pulse widths via hardware UART pins"
+  "description": "Streams IR pulses and optionally sends I²C commands"
 }
