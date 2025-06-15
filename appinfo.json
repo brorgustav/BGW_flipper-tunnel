@@ -4,7 +4,7 @@
   "version": "0.1",
   "author": "BGW",
   "icon": "icons/ir",
-  "exec": "BGW_FLIPPER-TUNNEL",
+  "exec": "BGW_FLIPPER_tunnel_app",
   "backend": "c",
   "description": "Streams IR pulse widths via hardware UART pins"
 }
