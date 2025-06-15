@@ -9,86 +9,90 @@ static const uint8_t i2c_cmd[CMD_LEN] = {0x10, 0xFF};
 
 typedef struct {
     bool i2c_enabled;
+    bool use_usb;           // true → USB serial, false → HW UART
 } TunnelAppState;
 
-// Menu button callback: toggles I²C on/off
-static void tunnel_menu_callback(View* view, uint32_t context) {
+// Toggle USB/HW serial
+static void tunnel_switch_serial(View* view, uint32_t context) {
     TunnelAppState* state = view_get_context(view);
-    bool new_val = !state->i2c_enabled;
-    furi_message_queue_put((FuriMessageQueue*)context, &new_val, 0);
+    state->use_usb = !state->use_usb;
 }
 
-// Draw callback: shows current status on screen
-static void tunnel_draw_callback(Canvas* canvas, void* ctx) {
-    TunnelAppState* state = ctx;
+// Toggle I²C transmission
+static void tunnel_toggle_i2c(View* view, uint32_t context) {
+    TunnelAppState* state = view_get_context(view);
+    state->i2c_enabled = !state->i2c_enabled;
+}
+
+// Draw the menu
+static void tunnel_draw(Canvas* canvas, void* ctx) {
+    TunnelAppState* s = ctx;
     canvas_clear(canvas);
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 0, 10, "bgw tunnel");
-    canvas_draw_str(canvas, 0, 30, state->i2c_enabled ? "I2C: ON" : "I2C: OFF");
-    canvas_draw_str(canvas, 0, 50, "Press OK to toggle");
+    canvas_draw_str(canvas, 0, 5, "bgw tunnel");
+    canvas_draw_str(canvas, 0, 20, s->i2c_enabled ? "I2C: ON" : "I2C: OFF");
+    canvas_draw_str(canvas, 0, 35, s->use_usb ? "Serial: USB" : "Serial: HW");
+    canvas_draw_str(canvas, 0, 50, "OK=I2C, MENU=Serial");
 }
 
 int32_t bgw_flipper_tunnel_app(void* p) {
     UNUSED(p);
-    TunnelAppState state = { .i2c_enabled = false };
+    TunnelAppState state = {0};
 
-    // Initialize hardware UART
-    FuriHalUartSettings uart_settings = {
+    // Init I²C
+    furi_hal_i2c_init();
+    furi_hal_io_init();
+    furi_hal_i2c_acquire(&FuriHalI2cHandleI2c);
+
+    // UART handles
+    FuriHalUartSettings uset = {
         .baud_rate = 115200,
         .data_bits = FuriHalUartDataBits8,
         .stop_bits = FuriHalUartStopBits1,
-        .parity = FuriHalUartParityNone
+        .parity    = FuriHalUartParityNone
     };
-    FuriHalUart* uart = furi_hal_uart_init(FuriHalUartIdMain, &uart_settings);
+    FuriHalUart* uart_hw = furi_hal_uart_init(FuriHalUartIdMain, &uset);
+    FuriHalUart* uart_usb = furi_hal_uart_init(FuriHalUartIdUsb, &uset);
 
-    // Set up menu view
-    FuriMessageQueue* menu_queue = furi_message_queue_alloc(1, sizeof(bool));
+    // Setup UI
     View* view = view_alloc();
     view_set_context(view, &state);
-    view_set_menu_callback(view, tunnel_menu_callback, (uint32_t)menu_queue);
-    view_set_draw_callback(view, tunnel_draw_callback, &state);
+    view_set_draw_callback(view, tunnel_draw, &state);
+    view_set_input_callback(view, [](View* v, FuriEvent* e, void* ctx){
+        TunnelAppState* s = ctx;
+        if(e->type == FuriEventTypePress) {
+            if(e->key == FuriKeyOk) tunnel_toggle_i2c(v, 0);
+            else if(e->key == FuriKeyBack) {} 
+            else if(e->key == FuriKeyOff) {}
+            else if(e->key == FuriKeyMenu) tunnel_switch_serial(v, 0);
+        }
+    }, &state);
     view_open(view);
 
-    // Initialize I²C master
-    furi_hal_i2c_init();
-    furi_hal_io_init(); // ensure I2C pins are configured
-    furi_hal_i2c_acquire(&FuriHalI2cHandleI2c);
-
-    // Main loop: check menu, optionally send I²C, always read IR
     while(1) {
-        bool new_val;
-        if(furi_message_queue_get(menu_queue, &new_val, 0) == FuriStatusOk) {
-            state.i2c_enabled = new_val;
-            char status_msg[32];
-            snprintf(status_msg, sizeof(status_msg), "I2C %s\r\n",
-                     state.i2c_enabled ? "Enabled" : "Disabled");
-            furi_hal_uart_transmit(uart, (uint8_t*)status_msg, strlen(status_msg), FuriHalWaitForever);
-        }
-
+        // I²C if enabled
         if(state.i2c_enabled) {
             bool ok = furi_hal_i2c_tx(&FuriHalI2cHandleI2c, SLAVE_ADDR, (uint8_t*)i2c_cmd, CMD_LEN, 1000);
-            char tx_msg[32];
-            snprintf(tx_msg, sizeof(tx_msg), "I2C send %s\r\n", ok ? "OK" : "FAIL");
-            furi_hal_uart_transmit(uart, (uint8_t*)tx_msg, strlen(tx_msg), FuriHalWaitForever);
+            const char* resp = ok ? "I2C OK\r\n" : "I2C FAIL\r\n";
+            furi_hal_uart_transmit(state.use_usb ? uart_usb : uart_hw, (uint8_t*)resp, strlen(resp), FuriHalWaitForever);
         }
-
-        uint16_t raw[64];
-        size_t count = 0;
+        // IR pulses
+        uint16_t raw[64]; size_t count=0;
         ir_read_raw(raw, &count, 64, 1000);
-        for(size_t i = 0; i < count; i++) {
-            char buf[16];
-            int len = snprintf(buf, sizeof(buf), "%u%s", raw[i], (i+1<count)?",":"\r\n");
-            furi_hal_uart_transmit(uart, (uint8_t*)buf, len, FuriHalWaitForever);
+        for(size_t i=0;i<count;i++){
+            char buf[20];
+            int l=snprintf(buf,sizeof(buf),"%u%s",raw[i],(i+1<count)?",":"\r\n");
+            furi_hal_uart_transmit(state.use_usb ? uart_usb : uart_hw, (uint8_t*)buf, l, FuriHalWaitForever);
         }
-
         furi_delay_ms(500);
     }
 
-    // Clean up (unreachable in current infinite loop)
-    furi_hal_uart_deinit(uart);
+    // Cleanup (never reached in current loop)
+    furi_hal_uart_deinit(uart_hw);
+    furi_hal_uart_deinit(uart_usb);
     furi_hal_i2c_release(&FuriHalI2cHandleI2c);
     furi_hal_i2c_deinit_early();
     view_free(view);
-    furi_message_queue_free(menu_queue);
+
     return 0;
 }
