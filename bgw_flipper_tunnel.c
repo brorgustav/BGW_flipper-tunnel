@@ -1,317 +1,157 @@
+
 #include <stddef.h>
 #include <furi.h>
 #include <furi_hal.h>
 #include <gui/gui.h>
+#include <furi_hal.h>
+#include <furi_hal_serial.h>
+#include <furi_hal_usb.h>
 #include <infrared.h>
 #include <infrared_worker.h>
-#include <input/input.h>
 #include <storage/storage.h>
-#include <stdlib.h>
-#include <time.h>
 #include <toolbox/name_generator.h>
 
-#define TAG             "flame_rng"
-#define HISTORY_SIZE    5
-#define MAX_PATH_LENGTH 256
-#define MAX_NAME_LENGTH 128
+#define TAG        "BGW_flipper_tunnel"
+#define MAX_BUF    64
+#define HOLD_TIME_MS 1000
 
 typedef struct {
     bool use_usb;
-    bool send_i2c;
-} TunnelState;
-
-typedef struct {
-    uint32_t rng_value;
-    uint32_t seed;
-    uint32_t history[HISTORY_SIZE];
-    uint8_t history_index;
-    bool new_value;
+    bool use_uart;
+    bool use_i2c;
+    bool log_to_file;
+    uint32_t last_rng;
     FuriMutex* mutex;
-    uint32_t message_timestamp;
-} FlameRngState;
+    bool in_menu;
+    uint32_t back_pressed_time;
+    uint32_t ok_pressed_time;
+} FlameTunnelState;
 
-byte task=1;
+static void process_ir(FlameTunnelState* s, uint32_t rng) {
+    char buf[MAX_BUF];
+    int len = snprintf(buf, MAX_BUF, "RNG:%lu\n", rng);
 
-static void ir_callback(void* ctx, InfraredWorkerSignal* signal) {
-    (void)ctx;
-    (void)signal;
-    // TODO: IR handling here
-    if (task == 1) //flame_rng
-    {
-    }
-     if (task == 2)
-    {
-    }
-     if (task == 3)
-    {
-    }
-    rng_generate(ctx, signal);
-}
-
-static void rng_generate(void* ctx, InfraredWorkerSignal* signal) { //was called ir_callback
-    FlameRngState* state = ctx;
-    uint32_t seed = generate_rng_from_ir(signal);
-
-    furi_mutex_acquire(state->mutex, FuriWaitForever);
-
-    // Combine multiple entropy sources
-    uint32_t rng_number = seed ^ furi_hal_random_get();
-    rng_number ^= (uint32_t)furi_get_tick(); // System ticks
-
-    // Improved mixing function (based on xxHash)
-    rng_number ^= rng_number >> 15;
-    rng_number *= 0x85EBCA77;
-    rng_number ^= rng_number >> 13;
-    rng_number *= 0xC2B2AE3D;
-    rng_number ^= rng_number >> 16;
-
-    // Better range reduction without bias
-    uint64_t scaled = (uint64_t)rng_number * 1000000ULL;
-    state->rng_value = (scaled >> 32); // Take high bits
-
-    state->seed = seed;
-    update_history(state, state->rng_value);
-    state->new_value = true;
-    state->message_timestamp = furi_get_tick();
-
-    furi_mutex_release(state->mutex);
-    FURI_LOG_I(TAG, "Generated RNG: %lu (seed: %lu)", state->rng_value, state->seed);
-}
-
-static bool save_random_numbers(FlameRngState* state) {
-    Storage* storage = furi_record_open(RECORD_STORAGE);
-    Stream* file = NULL;
-    bool success = false;
-
-    // Create directory if it doesn't exist
-    if(!storage_simply_mkdir(storage, "/ext/random_gen")) {
-        FURI_LOG_E(TAG, "Failed to create directory");
-        furi_record_close(RECORD_STORAGE);
-        return false;
+    if(s->use_usb) furi_hal_usb_tx((uint8_t*)buf, len, FuriHalWaitForever);
+    if(s->use_uart) furi_hal_serial_tx((uint8_t*)buf, len, FuriHalWaitForever);
+    if(s->use_i2c) {
+        // Add your I2C transmission logic here
     }
 
-
-    // Generate random filename
-    char filename[MAX_PATH_LENGTH];
-    char name_buffer[MAX_NAME_LENGTH]; // You might need to define MAX_NAME_LENGTH
-    name_generator_make_auto(name_buffer, sizeof(name_buffer), "RANDOM");
-    snprintf(filename, sizeof(filename), "/ext/random_gen/%s.rng", name_buffer);
-
-    file = file_stream_alloc(storage);
-    if(!file_stream_open(file, filename, FSAM_WRITE, FSOM_CREATE_NEW)) {
-        FURI_LOG_E(TAG, "Failed to open file: %s", filename);
-        goto cleanup;
-    }
-
-    // Write all history numbers
-    for(uint8_t i = 0; i < HISTORY_SIZE; i++) {
-        uint8_t idx = (state->history_index + i) % HISTORY_SIZE;
-        if(stream_write_format(file, "%lu\n", state->history[idx]) == 0) {
-            FURI_LOG_E(TAG, "Failed to write to file");
-            goto cleanup;
-        }
-    }
-
-    success = true;
-    FURI_LOG_I(TAG, "Saved random numbers to %s", filename);
-
-cleanup:
-    if(file) {
+    if(s->log_to_file) {
+        Storage* st = furi_record_open(RECORD_STORAGE);
+        Stream* file = file_stream_alloc(st);
+        file_stream_open(file, "/ext/flame_tunnel.log", FSAM_APPEND, FSOM_OPEN_EXISTING);
+        stream_write(file, (uint8_t*)buf, len);
         file_stream_close(file);
-        stream_free(file);
+        file_stream_free(file);
+        furi_record_close(RECORD_STORAGE);
     }
-    furi_record_close(RECORD_STORAGE);
-    return success;
+
+    s->last_rng = rng;
 }
 
-static uint32_t generate_rng_from_ir(InfraredWorkerSignal* signal) {
-    const uint32_t* timings;
-    size_t timings_cnt;
-    infrared_worker_get_raw_signal(signal, &timings, &timings_cnt);
-
-    uint32_t seed = furi_hal_random_get(); // Start with hardware RNG
-    uint32_t cpu_ticks = DWT->CYCCNT; // CPU cycle counter
-
-    seed ^= seed >> 16;
-    seed *= 0x7feb352d;
-    seed ^= seed >> 15;
-    seed *= 0x846ca68b;
-    seed ^= seed >> 16;
-
-    // More thorough mixing of entropy sources
-    for(size_t i = 0; i < timings_cnt; i++) {
-        seed = (seed << 7) ^ (seed >> 25) ^ timings[i];
-        seed += cpu_ticks ^ (i * 0x9E3779B9);
-        cpu_ticks = DWT->CYCCNT; // Refresh CPU ticks
-    }
-
+static uint32_t generate_rng(IRWorkerSignal* sig) {
+    const uint32_t* times; size_t n;
+    infrared_worker_get_raw_signal(sig, &times, &n);
+    uint32_t seed = furi_hal_random_get() ^ DWT->CYCCNT;
+    for(size_t i = 0; i < n; i++) seed ^= times[i] + i;
     return seed;
 }
 
-static void update_history(FlameRngState* state, uint32_t value) {
-    state->history[state->history_index] = value;
-    state->history_index = (state->history_index + 1) % HISTORY_SIZE;
+static void ir_callback(void* ctx, InfraredWorkerSignal* sig) {
+    FlameTunnelState* s = ctx;
+    uint32_t rng = generate_rng(sig);
+    furi_mutex_acquire(s->mutex, FuriWaitForever);
+    process_ir(s, rng);
+    furi_mutex_release(s->mutex);
 }
 
-static void render_callback(Canvas* canvas, void* ctx) {
-    TunnelState* state = ctx;
-    canvas_clear(canvas);
-    canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 10, state->use_usb ? "USB" : "HW");
-    canvas_draw_str(canvas, 2, 30, state->send_i2c ? "I2C:on" : "I2C:off");
-}
-
-static void rng_generator_canvas(Canvas* canvas, void* ctx) {  //was called static void render_callback
-    FlameRngState* state = ctx;
-    furi_mutex_acquire(state->mutex, FuriWaitForever);
-
-    canvas_clear(canvas);
-    canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 10, "Flame RNG");
-
-    // Main random number display (always updates)
-    canvas_set_font(canvas, FontBigNumbers);
-    char value_str[32];
-    snprintf(value_str, sizeof(value_str), "%06lu", state->rng_value);
-    canvas_draw_str_aligned(canvas, 64, 30, AlignCenter, AlignCenter, value_str);
-
-    // Status message (disappears after some time)
-    if(state->new_value) {
-        uint32_t current_time = furi_get_tick();
-        uint32_t elapsed_time = current_time - state->message_timestamp;
-
-        if(elapsed_time < 1000) {
-            canvas_set_font(canvas, FontSecondary);
-            canvas_draw_str(canvas, 2, 55, "New value! Press OK to save");
-        } else {
-            state->new_value = false; // Clear the message after delay
-        }
+static void draw(Canvas* c, void* ctx) {
+    FlameTunnelState* s = ctx;
+    canvas_clear(c);
+    canvas_set_font(c, FontPrimary);
+    if(s->in_menu) {
+        canvas_draw_str(c, 2, 10, "Config Menu");
+        int y = 30;
+        #define OPTION(name, flag) canvas_draw_str(c, 2, y, flag ? name " ON" : name " OFF"); y+=10;
+        OPTION("USB", s->use_usb);
+        OPTION("UART", s->use_uart);
+        OPTION("I2C", s->use_i2c);
+        OPTION("Log", s->log_to_file);
     } else {
-        canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 2, 55, "Waiting for IR signal...");
+        canvas_draw_str(c, 2, 10, "Flame Tunnel");
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%06lu", s->last_rng);
+        canvas_set_font(c, FontBigNumbers);
+        canvas_draw_str_aligned(c, 64, 30, AlignCenter, AlignCenter, buf);
+        canvas_set_font(c, FontSecondary);
+        int y = 60;
+        #define STATUS(name, flag) canvas_draw_str(c, 2, y, flag ? name " ON" : name " OFF"); y+=10;
+        STATUS("USB", s->use_usb);
+        STATUS("UART", s->use_uart);
+        STATUS("I2C", s->use_i2c);
+        STATUS("Log", s->log_to_file);
     }
-
-    furi_mutex_release(state->mutex);
 }
 
-static void input_callback(InputEvent* input_event, void* ctx) {
-    FuriMessageQueue* event_queue = ctx;
-    furi_message_queue_put(event_queue, input_event, FuriWaitForever);
-}
-static void tunnel_switch_serial(void* ctx) {
-    ((TunnelState*)ctx)->use_usb ^= 1;
-}
-
-static void tunnel_toggle_i2c(void* ctx) {
-    ((TunnelState*)ctx)->send_i2c ^= 1;
-}
-
-
-int32_t flame_rng(void* p) {
-    UNUSED(p);
-    FURI_LOG_I(TAG, "Starting Flame RNG");
-
-    // Initialize state
-    FlameRngState* state = malloc(sizeof(FlameRngState));
-    state->rng_value = 0;
-    state->seed = 0;
-    state->history_index = 0;
-    state->new_value = false;
-    memset(state->history, 0, sizeof(state->history));
-    state->mutex = furi_mutex_alloc(FuriMutexTypeNormal);
-
-    // Set up message queue
-    FuriMessageQueue* event_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
-
-    // Set up ViewPort
-    ViewPort* view_port = view_port_alloc();
-    view_port_draw_callback_set(view_port, render_callback, state);
-    view_port_input_callback_set(view_port, input_callback, event_queue);
-
-    // Register viewport in GUI
-    Gui* gui = furi_record_open(RECORD_GUI);
-    gui_add_view_port(gui, view_port, GuiLayerFullscreen);
-
-    // Set up infrared
-    InfraredWorker* worker = infrared_worker_alloc();
-    infrared_worker_rx_enable_signal_decoding(worker, false);
-    infrared_worker_rx_set_received_signal_callback(worker, ir_callback, state);
-    infrared_worker_rx_start(worker);
-
-    // Main loop
-    InputEvent event;
-    bool running = true;
-    while(running) {
-        if(furi_message_queue_get(event_queue, &event, 100) == FuriStatusOk) {
-            if(event.type == InputTypePress) {
-                if(event.key == InputKeyBack) {
-                    running = false;
-                } else if(event.key == InputKeyOk) {
-                    furi_mutex_acquire(state->mutex, FuriWaitForever);
-                    bool saved = save_random_numbers(state);
-                    furi_mutex_release(state->mutex);
-
-                    if(saved) {
-                        // Show save confirmation
-                        view_port_update(view_port);
-                        furi_delay_ms(500);
-                    }
-                }
+static void input_cb(InputEvent* ev, void* ctx) {
+    FlameTunnelState* s = ctx;
+    if(ev->type == InputTypePress) {
+        if(ev->key == InputKeyBack) s->back_pressed_time = furi_get_tick();
+        if(ev->key == InputKeyOk) s->ok_pressed_time = furi_get_tick();
+    } else if(ev->type == InputTypeRelease) {
+        uint32_t now = furi_get_tick();
+        if(ev->key == InputKeyBack && now - s->back_pressed_time >= HOLD_TIME_MS) {
+            furi_exit_app();
+        } else if(ev->key == InputKeyOk && now - s->ok_pressed_time >= HOLD_TIME_MS) {
+            s->in_menu = !s->in_menu;
+        } else if(s->in_menu) {
+            switch(ev->key) {
+                case InputKeyLeft: s->use_usb = !s->use_usb; break;
+                case InputKeyRight: s->use_uart = !s->use_uart; break;
+                case InputKeyUp: s->use_i2c = !s->use_i2c; break;
+                case InputKeyOk: s->log_to_file = !s->log_to_file; break;
+                default: break;
             }
         }
-        view_port_update(view_port);
     }
-
-    // Cleanup
-    infrared_worker_rx_stop(worker);
-    infrared_worker_free(worker);
-    gui_remove_view_port(gui, view_port);
-    view_port_free(view_port);
-    furi_message_queue_free(event_queue);
-    furi_mutex_free(state->mutex);
-    free(state);
-    furi_record_close(RECORD_GUI);
-
-    FURI_LOG_I(TAG, "Stopping Flame RNG");
-    return 0;
 }
 
-int32_t bgw_flipper_tunnel_app(void* p) {
-    (void)p;
-    TunnelState state = { .use_usb = true, .send_i2c = false };
+int32_t bgw_flipper_tunnel(void* p) {
+    UNUSED(p);
+    FlameTunnelState st = {
+        .use_usb = true,
+        .use_uart = false,
+        .use_i2c = false,
+        .log_to_file = false,
+        .last_rng = 0,
+        .mutex = furi_mutex_alloc(FuriMutexTypeNormal),
+        .in_menu = false,
+        .back_pressed_time = 0,
+        .ok_pressed_time = 0,
+    };
 
     ViewPort* vp = view_port_alloc();
-    view_port_draw_callback_set(vp, render_callback, &state);
+    view_port_draw_callback_set(vp, draw, &st);
+    view_port_input_callback_set(vp, input_cb, &st);
     Gui* gui = furi_record_open(RECORD_GUI);
     gui_add_view_port(gui, vp, GuiLayerFullscreen);
 
-    InfraredWorker* worker = infrared_worker_alloc();
-    infrared_worker_rx_set_received_signal_callback(worker, ir_callback, &state);
-    infrared_worker_rx_start(worker);
+    InfraredWorker* w = infrared_worker_alloc();
+    infrared_worker_rx_set_received_signal_callback(w, ir_callback, &st);
+    infrared_worker_rx_start(w);
 
-    FuriMessageQueue* msgs = furi_message_queue_alloc(8, sizeof(InputEvent));
-    bool running = true;
-    while (running) {
-        InputEvent ev;
-        if (furi_message_queue_get(msgs, &ev, 100) == FuriStatusOk) {
-            if (ev.type == InputTypePress) {
-                switch (ev.key) {
-                    case InputKeyBack:     running = false; break;
-                    case InputKeyOk:       tunnel_toggle_i2c(&state); break;
-                    case InputKeyLeft:
-                    case InputKeyRight:    tunnel_switch_serial(&state); break;
-                    default: break;
-                }
-            }
-        }
+    while(1) {
+        view_port_update(vp);
+        furi_delay_ms(100);
     }
 
-    infrared_worker_rx_stop(worker);
-    infrared_worker_free(worker);
+    infrared_worker_rx_stop(w);
+    infrared_worker_free(w);
     gui_remove_view_port(gui, vp);
     view_port_free(vp);
-    furi_message_queue_free(msgs);
+    furi_mutex_free(st.mutex);
     furi_record_close(RECORD_GUI);
-
     return 0;
 }
+
