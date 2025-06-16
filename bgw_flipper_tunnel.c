@@ -1,7 +1,6 @@
 
 #include <stddef.h>
 #include <furi.h>
-#include <furi_hal.h>
 #include <gui/gui.h>
 #include <furi_hal.h>
 #include <furi_hal_serial.h>
