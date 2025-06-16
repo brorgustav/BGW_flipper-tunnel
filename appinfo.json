@@ -6,5 +6,5 @@
   "icon": "icons/ir",
   "exec": "bgw_flipper_tunnel_app",
   "backend": "c",
-  "description": "Streams IR pulses and optionally sends I²C commands"
+  "description": "Streams IR pulses and optional I²C, selectable USB/HW serial"
 }

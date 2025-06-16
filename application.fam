@@ -1,0 +1,8 @@
+App(
+    appid="bgw_flipper_tunnel",
+    name="BGW Flipper Tunnel",
+    entry_point="bgw_flipper_tunnel_app",
+    apptype=FlipperAppType.EXTERNAL,
+    fap_libs=["infrared"],
+    requires=["infrared"],
+)
