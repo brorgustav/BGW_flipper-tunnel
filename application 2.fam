@@ -3,14 +3,6 @@ App(
     name="BGW Flipper Tunnel",
     entry_point="bgw_flipper_tunnel_app",
     apptype=FlipperAppType.EXTERNAL,
-    requires=[
-    "furi",
-    "gui",
-    "input",
-    "infrared",
-    "storage",
-    "record",
-    "usb-cdc",
-    "serial-control",
-    ]
-    )
+    fap_libs=["infrared"],
+    requires=["infrared"],
+)

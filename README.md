@@ -74,3 +74,10 @@ ls /dev/cu.*usbmodem*
 fbt flash --interface=/dev/cu.usbmodemflip_Bgwflip1
 
         fbt flash
+
+
+        cd build/f7-firmware-D/.extapps/
+
+
+        cp build/f7-firmware-D/.extapps/bgw_flipper_tunnel.fap \
+   /Volumes/FLIPPER/apps/

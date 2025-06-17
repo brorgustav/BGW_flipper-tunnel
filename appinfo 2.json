@@ -7,15 +7,4 @@
   "exec": "bgw_flipper_tunnel_app",
   "backend": "c",
   "description": "Streams IR pulses and optional I²C, selectable USB/HW serial"
-
-   "requires": [
-    "furi",
-    "gui",
-    "input",
-    "infrared",
-    "storage",
-    "record",
-    "usb-cdc",
-    "serial-control"
-    ]
 }
