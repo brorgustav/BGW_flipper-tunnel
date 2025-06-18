@@ -257,7 +257,7 @@ static void process_ir(FlameTunnelState* s, uint32_t rng) {
                          FSAM_WRITE, FSOM_OPEN_ALWAYS);
         stream_write(file, (const uint8_t*)buf, len);
         file_stream_close(file);
-        // stream_free(file);
+        stream_free(file);
         furi_record_close(RECORD_STORAGE);
     } s->last_rng = rng;
 }
@@ -337,7 +337,7 @@ UNUSED(p);
     FlameTunnelState st = {
         .running           = true,
         .use_usb           = true,
-        .use_uart          = false,
+        .use_uart          = true,
         .use_i2c           = false,
         .log_to_file       = false,
         .last_rng          = 0,
@@ -366,6 +366,15 @@ UNUSED(p);
     infrared_worker_rx_start(worker);
 
     while(st.running) {
+        if(st.use_uart) {
+            uint8_t rx_buf[64];
+            size_t rx_len = furi_hal_serial_rx(st.serial_handle, rx_buf, sizeof(rx_buf));
+            if(rx_len > 0) {
+                if(st.use_usb) {
+                    furi_hal_cdc_send(0, rx_buf, rx_len);
+                }
+            }
+        }
         view_port_update(vp);
         furi_delay_ms(100);
     }
